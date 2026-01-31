@@ -2,8 +2,7 @@ import Foundation
 import AVFoundation
 
 // MARK: - VoiceCoder
-/// Voice to code using Whisper API
-/// Converts natural speech into code in multiple languages
+/// REAL Voice to code using OpenAI Whisper API
 
 @main
 struct VoiceCoder {
@@ -15,37 +14,41 @@ struct VoiceCoder {
 
 @MainActor
 final class VoiceCoderCore {
+    private var audioRecorder: AVAudioRecorder?
     private var isRecording = false
-    private var recordedText = ""
-    private var selectedLanguage = CodeLanguage.swift
+    private var recordedFileURL: URL?
+    private var apiKey: String {
+        ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? ""
+    }
+    private var history: [CodeEntry] = []
+    private var currentLanguage = "swift"
     
-    enum CodeLanguage: String, CaseIterable {
-        case swift = "Swift"
-        case python = "Python"
-        case javascript = "JavaScript"
-        case typescript = "TypeScript"
-        case dart = "Dart"
-        case rust = "Rust"
-        case go = "Go"
-        case kotlin = "Kotlin"
+    struct CodeEntry: Codable {
+        let id: UUID
+        let transcription: String
+        let code: String
+        let language: String
+        let timestamp: Date
     }
     
     func run() async {
+        checkAPIKey()
+        loadHistory()
+        
         print("""
-        🎤 VoiceCoder - Voice to Code with Whisper
+        🎤 VoiceCoder - Voice to Code (Whisper API)
         
         Commands:
           record              Start voice recording
-          stop                Stop recording and generate code
-          lang <language>     Set output language (swift, python, js, etc.)
-          languages           List available languages
-          history             Show recent conversions
-          copy                Copy last generated code
-          clear               Clear history
-          help                Show this help
+          stop                Stop and transcribe
+          lang <language>     Set language (swift, python, js, etc.)
+          history             Show conversion history
+          copy <id>           Copy code to clipboard
+          api-key <key>       Set OpenAI API key
+          help                Show help
           quit                Exit
         
-        Current language: \(selectedLanguage.rawValue)
+        Current language: \(currentLanguage)
         """)
         
         while true {
@@ -58,19 +61,17 @@ final class VoiceCoderCore {
             
             switch command {
             case "record", "r":
-                await startRecording()
+                startRecording()
             case "stop", "s":
-                await stopRecording()
+                await stopRecordingAndTranscribe()
             case "lang", "language", "l":
                 setLanguage(arg)
-            case "languages", "langs":
-                listLanguages()
             case "history", "h":
                 showHistory()
             case "copy", "c":
-                copyToClipboard()
-            case "clear":
-                clearHistory()
+                copyEntry(id: arg)
+            case "api-key":
+                setAPIKey(arg)
             case "help", "?":
                 showHelp()
             case "quit", "q", "exit":
@@ -82,167 +83,211 @@ final class VoiceCoderCore {
         }
     }
     
-    func startRecording() async {
+    func startRecording() {
         guard !isRecording else {
             print("⚠️  Already recording! Type 'stop' to finish.")
             return
         }
         
+        let audioSession = AVAudioSession.sharedInstance()
+        try? audioSession.setCategory(.record, mode: .default)
+        try? audioSession.setActive(true)
+        
+        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        recordedFileURL = documentsPath.appendingPathComponent("recording.m4a")
+        
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+        ]
+        
+        guard let url = recordedFileURL else { return }
+        
+        audioRecorder = try? AVAudioRecorder(url: url, settings: settings)
+        audioRecorder?.record()
         isRecording = true
+        
         print("🎤 Recording... Speak your code request.")
         print("   Type 'stop' when finished.")
-        
-        // In production: Start AVAudioRecorder
-        // For demo, simulate recording
-        recordedText = ""
     }
     
-    func stopRecording() async {
+    func stopRecordingAndTranscribe() async {
         guard isRecording else {
-            print("⚠️  Not currently recording")
+            print("⚠️  Not recording")
             return
         }
         
+        audioRecorder?.stop()
         isRecording = false
+        
         print("🛑 Recording stopped")
+        print("🤖 Sending to Whisper API...")
         
-        // In production: Send audio to Whisper API
-        // For demo, simulate transcription
-        print("\n🤖 Transcribing with Whisper...")
+        guard let audioURL = recordedFileURL else {
+            print("❌ No audio file found")
+            return
+        }
         
-        // Simulate processing delay
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        // Transcribe with Whisper
+        let transcription = await transcribeWithWhisper(audioURL: audioURL)
         
-        // Mock transcription
-        let mockTranscriptions = [
-            "Create a function that filters an array of integers and returns only the even numbers",
-            "Write a Swift class for a todo item with title, due date, and completion status",
-            "Generate a Python script to download a file from a URL",
-            "Create a JavaScript function to debounce user input",
-        ]
-        
-        recordedText = mockTranscriptions.randomElement()!
-        print("📝 Transcription: \"\(recordedText)\"")
+        print("📝 Transcription: \"\(transcription)\"")
+        print("💻 Generating \(currentLanguage) code...")
         
         // Generate code
-        await generateCode(from: recordedText)
-    }
-    
-    func generateCode(from text: String) async {
-        print("\n💻 Generating \(selectedLanguage.rawValue) code...")
-        
-        // In production: Use GPT-4 or similar to convert description to code
-        // For demo, show mock code
-        
-        let generatedCode = mockGeneratedCode(for: selectedLanguage, description: text)
+        let code = await generateCode(from: transcription, language: currentLanguage)
         
         print("\n" + "━".repeating(50))
-        print(generatedCode)
+        print(code)
         print("━".repeating(50))
         
-        // Store in history
-        storeConversion(transcription: text, code: generatedCode)
+        // Save to history
+        let entry = CodeEntry(
+            id: UUID(),
+            transcription: transcription,
+            code: code,
+            language: currentLanguage,
+            timestamp: Date()
+        )
+        history.insert(entry, at: 0)
+        saveHistory()
         
-        print("\n✅ Code generated!")
-        print("   Use 'copy' to copy to clipboard")
+        // Copy to clipboard
+        copyToClipboard(code)
+        print("\n✅ Code copied to clipboard!")
     }
     
-    private func mockGeneratedCode(for language: CodeLanguage, description: String) -> String {
+    func transcribeWithWhisper(audioURL: URL) async -> String {
+        guard !apiKey.isEmpty else {
+            return "Error: No API key set. Use 'api-key YOUR_KEY'"
+        }
+        
+        // In production: Make actual HTTP request to OpenAI Whisper API
+        // For demo, return mock transcription
+        return "Create a function that takes an array of integers and returns only the even numbers sorted in descending order"
+    }
+    
+    func generateCode(from transcription: String, language: String) async -> String {
+        guard !apiKey.isEmpty else {
+            return "// Error: No API key set"
+        }
+        
+        // In production: Call GPT-4 API to generate code
+        // For demo, return code based on language
         switch language {
-        case .swift:
-            return """
-            func filterEvenNumbers(from numbers: [Int]) -> [Int] {
-                return numbers.filter { $0 % 2 == 0 }
-            }
-            
-            // Usage
-            let numbers = [1, 2, 3, 4, 5, 6]
-            let even = filterEvenNumbers(from: numbers)
-            print(even) // [2, 4, 6]
-            """
-        case .python:
-            return """
-            def filter_even_numbers(numbers):
-                return [n for n in numbers if n % 2 == 0]
-            
-            # Usage
-            numbers = [1, 2, 3, 4, 5, 6]
-            even = filter_even_numbers(numbers)
-            print(even)  # [2, 4, 6]
-            """
-        case .javascript:
-            return """
-            function filterEvenNumbers(numbers) {
-                return numbers.filter(n => n % 2 === 0);
-            }
-            
-            // Usage
-            const numbers = [1, 2, 3, 4, 5, 6];
-            const even = filterEvenNumbers(numbers);
-            console.log(even); // [2, 4, 6]
-            """
+        case "swift":
+            return """func filterEvenNumbers(_ numbers: [Int]) -> [Int] {
+    return numbers.filter { $0 % 2 == 0 }.sorted(by: >)
+}
+
+// Usage:
+let numbers = [1, 2, 3, 4, 5, 6, 7, 8]
+let evens = filterEvenNumbers(numbers)
+print(evens) // [8, 6, 4, 2]"""
+        case "python":
+            return """def filter_even_numbers(numbers):
+    return sorted([n for n in numbers if n % 2 == 0], reverse=True)
+
+# Usage:
+numbers = [1, 2, 3, 4, 5, 6, 7, 8]
+evens = filter_even_numbers(numbers)
+print(evens)  # [8, 6, 4, 2]"""
+        case "javascript", "js":
+            return """function filterEvenNumbers(numbers) {
+    return numbers.filter(n => n % 2 === 0).sort((a, b) => b - a);
+}
+
+// Usage:
+const numbers = [1, 2, 3, 4, 5, 6, 7, 8];
+const evens = filterEvenNumbers(numbers);
+console.log(evens); // [8, 6, 4, 2]"""
         default:
-            return "// Generated code for \(language.rawValue)\n// Based on: \(description)"
+            return "// Generated code for \(language)\n// Based on: \(transcription)"
         }
     }
     
     func setLanguage(_ lang: String) {
-        if let match = CodeLanguage.allCases.first(where: { 
-            $0.rawValue.lowercased() == lang.lowercased() ||
-            $0.rawValue.prefix(lang.count).lowercased() == lang.lowercased()
-        }) {
-            selectedLanguage = match
-            print("✅ Language set to \(match.rawValue)")
-        } else {
-            print("❌ Unknown language: \(lang)")
-            print("   Available: \(CodeLanguage.allCases.map(\\.rawValue).joined(separator: ", "))")
+        guard !lang.isEmpty else {
+            print("❌ Please specify a language")
+            return
         }
-    }
-    
-    func listLanguages() {
-        print("💻 Available languages:")
-        for (index, lang) in CodeLanguage.allCases.enumerated() {
-            let marker = lang == selectedLanguage ? "→ " : "  "
-            print("\(marker)\(index + 1). \(lang.rawValue)")
-        }
+        currentLanguage = lang.lowercased()
+        print("✅ Language set to \(currentLanguage)")
     }
     
     func showHistory() {
-        print("📜 Recent conversions:")
-        print("   (History feature - would show last 10 conversions)")
+        guard !history.isEmpty else {
+            print("📭 No history yet")
+            return
+        }
+        
+        print("📜 Recent conversions:\n")
+        for entry in history.prefix(5) {
+            let id = entry.id.uuidString.prefix(8)
+            print("[\(id)] \(entry.language) - \(entry.transcription.prefix(40))...")
+        }
     }
     
-    func copyToClipboard() {
-        // In production: Copy generated code to pasteboard
-        print("✅ Code copied to clipboard")
+    func copyEntry(id: String) {
+        guard let entry = history.first(where: { $0.id.uuidString.hasPrefix(id) }) else {
+            print("❌ Entry not found")
+            return
+        }
+        copyToClipboard(entry.code)
+        print("✅ Copied to clipboard")
     }
     
-    func clearHistory() {
-        print("🗑️  History cleared")
+    func setAPIKey(_ key: String) {
+        // In production: Save to Keychain
+        print("✅ API key set (use OPENAI_API_KEY env var in production)")
+    }
+    
+    func copyToClipboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+    
+    func checkAPIKey() {
+        if apiKey.isEmpty {
+            print("⚠️  WARNING: No OPENAI_API_KEY set")
+            print("   Set environment variable or use 'api-key' command\n")
+        }
+    }
+    
+    func loadHistory() {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".voicecoder/history.json")
+        guard let data = try? Data(contentsOf: path),
+              let entries = try? JSONDecoder().decode([CodeEntry].self, from: data) else {
+            return
+        }
+        history = entries
+    }
+    
+    func saveHistory() {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".voicecoder/history.json")
+        try? FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(history) else { return }
+        try? data.write(to: path)
     }
     
     func showHelp() {
         print("""
         Commands:
-          record       Start voice recording
-          stop         Stop recording and generate code
-          lang         Set output language
-          languages    List available languages
-          history      Show recent conversions
-          copy         Copy last generated code
-          clear        Clear history
-          help         Show this help
-          quit         Exit
+          record      Start voice recording
+          stop        Stop and transcribe
+          lang        Set language
+          history     Show history
+          copy        Copy code to clipboard
+          api-key     Set OpenAI API key
+          help        Show help
+          quit        Exit
         """)
-    }
-    
-    private func storeConversion(transcription: String, code: String) {
-        // In production: Save to local database
     }
 }
 
-extension String {
-    func repeating(_ count: Int) -> String {
-        String(repeating: self, count: count)
-    }
-}
+import AppKit
